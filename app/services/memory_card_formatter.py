@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 from app.schemas.memory_chat import MemoryCard, MemoryDraft
+from app.services.memory_card_export_service import build_exportable_memory_card
 
 
 def format_memory_card(question: str, answer_lines: list[str], draft: MemoryDraft) -> MemoryCard:
-    keywords_line = " → ".join(draft.keywords)
-    imagery_text = "\n".join([f"{idx + 1}. {line}" for idx, line in enumerate(draft.imagery)])
-    back = (
-        "关键词：\n"
-        f"{keywords_line}\n\n"
-        "想象画面：\n"
-        f"{imagery_text}\n\n"
-        "快速复述：\n"
-        f"{draft.recap}"
+    payload = build_exportable_memory_card(
+        question=question,
+        answer_lines=answer_lines,
+        keywords=draft.keywords,
+        imagery=draft.imagery,
+        recap=draft.recap,
+        strategy_ir=None,
     )
-    return MemoryCard(front=question, back=back)
+    return MemoryCard.model_validate(payload)

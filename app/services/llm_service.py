@@ -213,6 +213,39 @@ class LLMService:
             logger.error(f"内容扩展失败：{e}")
             return brief
 
+    def generate_visual_anchor(
+        self,
+        question: str,
+        source: str,
+        content_type: str = "",
+        primary_method: str = "",
+    ) -> str:
+        """
+        将抽象 source 映射为可视化锚点词（短词，具体，可动作化）。
+        只返回单个短词，不返回解释。
+        """
+        prompt = f"""你是记忆视觉化助手。请把给定概念改写为“具体可见且可动作化”的视觉锚点词。
+
+题目：{question}
+原始概念：{source}
+内容类型：{content_type}
+主方法：{primary_method}
+
+要求：
+1) 只输出一个 2~8 字中文名词或场景物体词。
+2) 禁止抽象词（如机制/原理/系统/策略）。
+3) 尽量用适合链式联想的物体。
+4) 不要解释，不要标点，不要 markdown。
+"""
+        response = self._invoke_with_timeout([HumanMessage(content=prompt)])
+        text = (response.content or "").strip()
+        text = text.replace("\n", " ").strip().strip("`").strip()
+        # 只取首个 token，避免模型加解释
+        text = re.split(r"[\s,，。；;:：]", text)[0].strip()
+        if not text:
+            raise ValueError("LLM visual anchor 为空")
+        return text[:12]
+
     def generate_memory_blocks(
         self,
         question: str,

@@ -1,46 +1,300 @@
 from __future__ import annotations
 
 from app.memory_engine import MemoryStrategyEngine
+from app.memory_engine.validator import validate_and_autofix_draft
+from app.memory_engine.visual_mapper import (
+    build_visual_anchors,
+    validate_imagery_lines,
+    validate_visual_anchors,
+)
+from app.services.method_composition_service import (
+    apply_secondary_methods_to_anchors,
+    choose_method_composition,
+    generate_composed_draft_parts,
+)
+from app.services.memory_card_export_service import build_exportable_memory_card
+from app.services.revision_patch_service import (
+    apply_revision_patches,
+    build_revision_patches,
+    parse_revision_intent,
+)
 from app.services.llm_service import llm_service
 
 engine = MemoryStrategyEngine()
 
 
+def _pick_memory_goal(content_type: str) -> str:
+    mapping = {
+        "timeline": "按时间顺序快速回忆",
+        "numbered_list": "按编号稳定回忆",
+        "alphabet_list": "按字母线索回忆",
+        "compare_contrast": "快速区分对比项",
+        "large_list": "分组压缩后回忆",
+        "sequence_list": "按步骤连续回忆",
+        "concept": "把抽象概念转成画面",
+    }
+    return mapping.get(content_type, "结构化快速回忆")
+
+
+def _estimate_difficulty(content_type: str, answer_lines: list[str]) -> str:
+    line_count = len(answer_lines)
+    if content_type in {"large_list", "compare_contrast"} or line_count >= 8:
+        return "hard"
+    if line_count >= 4 or content_type in {"timeline", "numbered_list", "sequence_list"}:
+        return "medium"
+    return "easy"
+
+
+def _build_analysis_reason(content_type: str, method: str, hook_system: str) -> str:
+    hook_text = "启用挂钩" if hook_system != "none_hooks" else "不启用挂钩"
+    return f"根据内容结构识别为 {content_type}，主方法选择 {method}，{hook_text}以平衡稳定性与负担。"
+
+
+def _infer_secondary_methods(primary_method: str, content_type: str) -> list[str]:
+    default_map = {
+        "link_method": ["substitute_method"],
+        "peg_method": ["link_method"],
+        "timeline_method": ["link_method"],
+        "contrast_method": ["substitute_method"],
+        "substitute_method": ["link_method"],
+    }
+    secondary = default_map.get(primary_method, ["link_method"])
+    if content_type == "compare_contrast" and "contrast_method" not in secondary:
+        secondary = ["contrast_method"] + secondary
+    return secondary[:2]
+
+
+def _infer_recap_style(recap: str) -> str:
+    text = (recap or "").strip()
+    if "→" in text:
+        return "arrow_sequence"
+    if "=" in text and ";" in text:
+        return "indexed_mapping"
+    if "|" in text:
+        return "contrast_pair"
+    return "plain_sequence"
+
+
+def _normalize_draft_payload(draft: dict, question: str, answer_lines: list[str]) -> dict:
+    return {
+        "contentType": str(draft.get("contentType", "concept")),
+        "hookSystem": str(draft.get("hookSystem", "none_hooks")),
+        "memoryMethod": str(draft.get("memoryMethod", "link_method")),
+        "keywords": [str(item).strip() for item in draft.get("keywords", []) if str(item).strip()][:9],
+        "imagery": [str(item).strip() for item in draft.get("imagery", []) if str(item).strip()][:10],
+        "recap": str(draft.get("recap", "")).strip(),
+        "question": question,
+        "answerLines": answer_lines,
+    }
+
+
+def _apply_anchors_to_draft(draft: dict, strategy_ir: dict, regenerate_imagery: bool = True) -> dict:
+    anchors = strategy_ir.get("anchors", []) or []
+    visuals = [str(item.get("visual", "")).strip() for item in anchors if str(item.get("visual", "")).strip()]
+
+    strategy = strategy_ir.get("strategy", {}) or {}
+    hook_policy = strategy.get("hookPolicy", {}) or {}
+    draft["memoryMethod"] = str(strategy.get("primaryMethod", draft.get("memoryMethod", "link_method")))
+    draft["hookSystem"] = str(hook_policy.get("hookSystem", draft.get("hookSystem", "none_hooks")))
+    if len(visuals) >= 3:
+        draft["keywords"] = visuals[:9]
+
+    if regenerate_imagery:
+        composed = generate_composed_draft_parts(strategy_ir, draft)
+        regenerated = composed["imagery"]
+        issues = validate_imagery_lines(regenerated, composed.get("anchors", anchors))
+        if issues:
+            draft["imagery"] = regenerated
+        else:
+            draft["imagery"] = regenerated
+        draft["keywords"] = composed["keywords"]
+        draft["recap"] = composed["recap"]
+
+    return draft
+
+
+def build_strategy_ir_from_draft(draft: dict) -> dict:
+    question = str(draft.get("question", "")).strip()
+    answer_lines = [str(line).strip() for line in draft.get("answerLines", []) if str(line).strip()]
+    content_type = str(draft.get("contentType", "concept")).strip() or "concept"
+    hook_system = str(draft.get("hookSystem", "none_hooks")).strip() or "none_hooks"
+    memory_method = str(draft.get("memoryMethod", "link_method")).strip() or "link_method"
+    keywords = [str(item).strip() for item in draft.get("keywords", []) if str(item).strip()][:9]
+    imagery = [str(item).strip() for item in draft.get("imagery", []) if str(item).strip()][:10]
+    recap = str(draft.get("recap", "")).strip()
+
+    memory_goal = _pick_memory_goal(content_type)
+    base_secondary = _infer_secondary_methods(memory_method, content_type)
+    prelim_strategy = choose_method_composition(
+        content_type=content_type,
+        memory_goal=memory_goal,
+        anchors=[],
+        current_primary=memory_method,
+        current_secondary=base_secondary,
+        current_hook_system=hook_system,
+    )
+
+    source_lines = answer_lines or keywords or [question or "默认要点"]
+    anchors = build_visual_anchors(
+        question=question,
+        answer_lines=source_lines,
+        content_type=content_type,
+        primary_method=prelim_strategy["primaryMethod"],
+        hook_system=prelim_strategy["hookPolicy"]["hookSystem"],
+        secondary_methods=prelim_strategy["secondaryMethods"],
+    )
+    final_strategy = choose_method_composition(
+        content_type=content_type,
+        memory_goal=memory_goal,
+        anchors=anchors,
+        current_primary=prelim_strategy["primaryMethod"],
+        current_secondary=prelim_strategy["secondaryMethods"],
+        current_hook_system=prelim_strategy["hookPolicy"]["hookSystem"],
+    )
+    anchors = build_visual_anchors(
+        question=question,
+        answer_lines=source_lines,
+        content_type=content_type,
+        primary_method=final_strategy["primaryMethod"],
+        hook_system=final_strategy["hookPolicy"]["hookSystem"],
+        secondary_methods=final_strategy["secondaryMethods"],
+    )
+    anchors = apply_secondary_methods_to_anchors(anchors, final_strategy["secondaryMethods"])
+    anchor_issues = validate_visual_anchors(anchors)
+    imagery_issues = validate_imagery_lines(imagery, anchors)
+    reason = _build_analysis_reason(content_type, final_strategy["primaryMethod"], final_strategy["hookPolicy"]["hookSystem"])
+    if anchor_issues:
+        reason += "（visual mapper 已自动兜底）"
+    if imagery_issues:
+        reason += "（imagery 需要基于 anchors 重建）"
+
+    return {
+        "version": "memory_strategy_ir.v1",
+        "task": {
+            "question": question,
+            "rawAnswerLines": answer_lines,
+        },
+        "analysis": {
+            "contentType": content_type,
+            "memoryGoal": memory_goal,
+            "difficulty": _estimate_difficulty(content_type, answer_lines),
+            "reason": reason,
+        },
+        "strategy": final_strategy,
+        "anchors": anchors,
+        "outputPolicy": {
+            "keywordCount": len(keywords),
+            "imagerySentenceCount": len(imagery),
+            "recapStyle": _infer_recap_style(recap),
+            "tone": "balanced",
+            "allowAbstractWords": False,
+        },
+    }
+
+
 def run_memory_strategy(raw_text: str) -> dict:
     # LLM 优先：直接完成题型/挂钩/方法/画面/复述的全量规划
     parsed = engine.parse_user_input(raw_text)
+    question = parsed["question"]
+    answer_lines = parsed["answerLines"]
     try:
-        llm_draft = llm_service.plan_memory_strategy(
-            question=parsed["question"],
-            answer_lines=parsed["answerLines"],
+        generated = llm_service.plan_memory_strategy(
+            question=question,
+            answer_lines=answer_lines,
             raw_text=raw_text,
         )
-        return {
-            **llm_draft,
-            "question": parsed["question"],
-            "answerLines": parsed["answerLines"],
-        }
+        generation_source = "llm"
     except Exception:
         # 规则兜底
-        return engine.build_draft(raw_text)
+        generated = engine.build_draft(raw_text)
+        generation_source = "fallback_rule_engine"
+
+    draft = _normalize_draft_payload(generated, question, answer_lines)
+    strategy_ir = build_strategy_ir_from_draft(draft)
+
+    # 关键改动：LLM 成功时优先保留其生成结果，避免被固定模板二次覆盖。
+    if generation_source == "llm":
+        anchors = strategy_ir.get("anchors", []) or []
+        if len(draft.get("keywords", []) or []) < 3:
+            draft["keywords"] = [str(item.get("visual", "")).strip() for item in anchors if str(item.get("visual", "")).strip()][:9]
+        draft["memoryMethod"] = strategy_ir.get("strategy", {}).get("primaryMethod", draft.get("memoryMethod"))
+        draft["hookSystem"] = strategy_ir.get("strategy", {}).get("hookPolicy", {}).get("hookSystem", draft.get("hookSystem"))
+        if len(draft.get("imagery", []) or []) < 5 or not draft.get("recap"):
+            composed = generate_composed_draft_parts(strategy_ir, draft)
+            if len(draft.get("imagery", []) or []) < 5:
+                draft["imagery"] = composed["imagery"]
+            if not draft.get("recap"):
+                draft["recap"] = composed["recap"]
+    else:
+        draft = _apply_anchors_to_draft(draft, strategy_ir)
+        composed = generate_composed_draft_parts(strategy_ir, draft)
+        draft["keywords"] = composed["keywords"]
+        draft["imagery"] = composed["imagery"]
+        draft["recap"] = composed["recap"]
+        draft["memoryMethod"] = strategy_ir.get("strategy", {}).get("primaryMethod", draft.get("memoryMethod"))
+        draft["hookSystem"] = strategy_ir.get("strategy", {}).get("hookPolicy", {}).get("hookSystem", draft.get("hookSystem"))
+
+    strategy_ir = build_strategy_ir_from_draft(draft)
+    strategy_ir["analysis"]["reason"] = f"{strategy_ir['analysis']['reason']}（source={generation_source}）"
+    strategy_ir, draft, quality = validate_and_autofix_draft(strategy_ir, draft)
+    strategy_ir["quality"] = quality
+    strategy_ir["outputPolicy"]["keywordCount"] = len(draft.get("keywords", []) or [])
+    strategy_ir["outputPolicy"]["imagerySentenceCount"] = len(draft.get("imagery", []) or [])
+    return {
+        "draft": draft,
+        "strategyIr": strategy_ir,
+    }
 
 
-def revise_memory_strategy(draft: dict, feedback: str) -> dict:
-    # LLM 优先修订完整策略草稿
-    try:
-        revised = llm_service.revise_memory_strategy(
-            question=draft.get("question", ""),
-            answer_lines=draft.get("answerLines", []),
-            current_draft=draft,
-            feedback=feedback,
-        )
-        # 固定任务上下文
-        revised["question"] = draft.get("question", "")
-        revised["answerLines"] = draft.get("answerLines", [])
-        return revised
-    except Exception:
-        return engine.revise_draft(draft, feedback)
+def revise_memory_strategy(draft: dict, feedback: str, strategy_ir: dict | None = None) -> dict:
+    # patch-based revise：先识别意图并 patch strategyIr，再局部重生成草稿
+    question = str(draft.get("question", "")).strip()
+    answer_lines = [str(line).strip() for line in draft.get("answerLines", []) if str(line).strip()]
+    normalized = _normalize_draft_payload(draft, question, answer_lines)
+
+    working_ir = strategy_ir or build_strategy_ir_from_draft(normalized)
+    intent = parse_revision_intent(feedback)
+    patches = build_revision_patches(intent, working_ir, normalized, feedback)
+
+    if patches:
+        patched_ir, patched_draft = apply_revision_patches(working_ir, normalized, patches)
+    else:
+        patched_ir, patched_draft = working_ir, normalized
+
+    # 保证草稿结构完整，并在必要时对齐 anchors
+    patched_draft = _normalize_draft_payload(patched_draft, question, answer_lines)
+    patched_draft = _apply_anchors_to_draft(patched_draft, patched_ir, regenerate_imagery=False)
+    composed = generate_composed_draft_parts(patched_ir, patched_draft)
+    patched_draft["keywords"] = composed["keywords"]
+    if not patched_draft.get("imagery"):
+        patched_draft["imagery"] = composed["imagery"]
+    if not patched_draft.get("recap"):
+        patched_draft["recap"] = composed["recap"]
+    patched_draft["memoryMethod"] = patched_ir.get("strategy", {}).get("primaryMethod", patched_draft.get("memoryMethod"))
+    patched_draft["hookSystem"] = patched_ir.get("strategy", {}).get("hookPolicy", {}).get("hookSystem", patched_draft.get("hookSystem"))
+    refreshed_ir = build_strategy_ir_from_draft(patched_draft)
+    # 尽量保留 patch 后输出策略偏好
+    if patched_ir.get("outputPolicy"):
+        refreshed_ir["outputPolicy"] = {**refreshed_ir.get("outputPolicy", {}), **patched_ir.get("outputPolicy", {})}
+        refreshed_ir["outputPolicy"]["keywordCount"] = len(patched_draft.get("keywords", []) or [])
+        refreshed_ir["outputPolicy"]["imagerySentenceCount"] = len(patched_draft.get("imagery", []) or [])
+    refreshed_ir, patched_draft, quality = validate_and_autofix_draft(refreshed_ir, patched_draft)
+    refreshed_ir["quality"] = quality
+    refreshed_ir["outputPolicy"]["keywordCount"] = len(patched_draft.get("keywords", []) or [])
+    refreshed_ir["outputPolicy"]["imagerySentenceCount"] = len(patched_draft.get("imagery", []) or [])
+
+    return {
+        "draft": patched_draft,
+        "strategyIr": refreshed_ir,
+    }
 
 
 def build_memory_card_from_draft(draft: dict) -> dict:
-    return engine.build_card(draft)
+    return build_exportable_memory_card(
+        question=str(draft.get("question", "")).strip(),
+        answer_lines=[str(line).strip() for line in draft.get("answerLines", []) if str(line).strip()],
+        keywords=[str(x).strip() for x in draft.get("keywords", []) if str(x).strip()],
+        imagery=[str(x).strip() for x in draft.get("imagery", []) if str(x).strip()],
+        recap=str(draft.get("recap", "")).strip(),
+        strategy_ir=draft.get("strategyIr"),
+    )

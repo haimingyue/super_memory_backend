@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from app.schemas.memory_chat import MemoryChatResponse, MemoryDraft, MemorySession, SessionTask
+from app.schemas.memory_chat import (
+    MemoryChatResponse,
+    MemoryCard,
+    MemoryDraft,
+    MemorySession,
+    MemoryStrategyIR,
+    SessionTask,
+)
 from app.services.memory_strategy_service import (
     build_memory_card_from_draft,
     revise_memory_strategy,
@@ -57,7 +64,8 @@ def handle_memory_conversation(session: MemorySession, message: str) -> MemoryCh
     if _is_new_task_message(message):
         parsed = parse_user_input(message)
         session.task = SessionTask(question=parsed["question"], answerLines=parsed["answerLines"])
-        draft_data = run_memory_strategy(message)
+        strategy_data = run_memory_strategy(message)
+        draft_data = strategy_data["draft"]
         draft = MemoryDraft(
             contentType=draft_data["contentType"],
             hookSystem=draft_data["hookSystem"],
@@ -67,6 +75,8 @@ def handle_memory_conversation(session: MemorySession, message: str) -> MemoryCh
             recap=draft_data["recap"],
         )
         session.draft = draft
+        if strategy_data.get("strategyIr"):
+            session.strategyIr = MemoryStrategyIR.model_validate(strategy_data["strategyIr"])
         session.state = "draft_generated"
         reply_text = _draft_to_text(draft, "draft")
         session.history.append(session_manager.make_message("assistant", "memory_draft", reply_text))
@@ -76,6 +86,7 @@ def handle_memory_conversation(session: MemorySession, message: str) -> MemoryCh
             replyType="draft",
             replyText=reply_text,
             draft=draft,
+            strategyIr=session.strategyIr,
         )
 
     if not session.task or not session.draft:
@@ -86,17 +97,22 @@ def handle_memory_conversation(session: MemorySession, message: str) -> MemoryCh
             sessionId=session.sessionId,
             replyType="question",
             replyText=reply_text,
+            strategyIr=session.strategyIr,
         )
 
     if _is_finalize_message(message):
-        card_data = build_memory_card_from_draft(
+        card_payload = build_memory_card_from_draft(
             {
                 "question": session.task.question,
+                "answerLines": session.task.answerLines,
                 "keywords": session.draft.keywords,
                 "imagery": session.draft.imagery,
                 "recap": session.draft.recap,
+                "strategyIr": session.strategyIr.model_dump() if session.strategyIr else None,
             }
         )
+        card_data = MemoryCard.model_validate(card_payload)
+        session.finalCard = card_data
         session.state = "finalized"
         reply_text = "已生成最终记忆卡片，你可以直接复制或导出。"
         session.history.append(session_manager.make_message("assistant", "memory_card", reply_text))
@@ -106,18 +122,31 @@ def handle_memory_conversation(session: MemorySession, message: str) -> MemoryCh
             replyType="final_card",
             replyText=reply_text,
             finalCard=card_data,
+            strategyIr=session.strategyIr,
         )
 
-    revised = revise_memory_strategy(session.draft.model_dump(), message)
+    revise_input = {
+        **session.draft.model_dump(),
+        "question": session.task.question,
+        "answerLines": session.task.answerLines,
+    }
+    revised_payload = revise_memory_strategy(
+        revise_input,
+        message,
+        strategy_ir=session.strategyIr.model_dump() if session.strategyIr else None,
+    )
+    revised = revised_payload["draft"]
     draft = MemoryDraft(
-        contentType=session.draft.contentType,
-        hookSystem=session.draft.hookSystem,
-        memoryMethod=session.draft.memoryMethod,
+        contentType=revised.get("contentType", session.draft.contentType),
+        hookSystem=revised.get("hookSystem", session.draft.hookSystem),
+        memoryMethod=revised.get("memoryMethod", session.draft.memoryMethod),
         keywords=revised["keywords"],
         imagery=revised["imagery"],
         recap=revised["recap"],
     )
     session.draft = draft
+    if revised_payload.get("strategyIr"):
+        session.strategyIr = MemoryStrategyIR.model_validate(revised_payload["strategyIr"])
     session.state = "revising"
     reply_text = _draft_to_text(draft, "revision")
     session.history.append(session_manager.make_message("assistant", "memory_revision", reply_text))
@@ -127,4 +156,5 @@ def handle_memory_conversation(session: MemorySession, message: str) -> MemoryCh
         replyType="revision",
         replyText=reply_text,
         draft=draft,
+        strategyIr=session.strategyIr,
     )

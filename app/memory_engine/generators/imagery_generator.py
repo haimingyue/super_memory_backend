@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+
 ACTION_POOL = [
     "缠住",
     "拖着",
@@ -30,61 +32,63 @@ def _validate_line(line: str) -> bool:
     return True
 
 
-def _make_link_events(points: list[str]) -> list[str]:
+def _make_link_events(points: list[str], action_offset: int = 0, scene_offset: int = 0) -> list[str]:
     events: list[str] = []
     for idx in range(len(points) - 1):
         a = points[idx]
         b = points[idx + 1]
-        v = ACTION_POOL[idx % len(ACTION_POOL)]
-        suffix = SCENE_SUFFIX[idx % len(SCENE_SUFFIX)]
+        v = ACTION_POOL[(idx + action_offset) % len(ACTION_POOL)]
+        suffix = SCENE_SUFFIX[(idx + scene_offset) % len(SCENE_SUFFIX)]
         line = f"{a}{v}{b}，{suffix}"
         events.append(_line_limit(line, 20))
     return events
 
 
-def _make_peg_events(hooks: list[str], points: list[str]) -> list[str]:
+def _make_peg_events(hooks: list[str], points: list[str], action_offset: int = 0, scene_offset: int = 0) -> list[str]:
     events: list[str] = []
     for idx, point in enumerate(points):
         hook = hooks[idx] if idx < len(hooks) else f"钩子{idx + 1}"
-        v = ACTION_POOL[idx % len(ACTION_POOL)]
-        suffix = SCENE_SUFFIX[idx % len(SCENE_SUFFIX)]
+        v = ACTION_POOL[(idx + action_offset) % len(ACTION_POOL)]
+        suffix = SCENE_SUFFIX[(idx + scene_offset) % len(SCENE_SUFFIX)]
         line = f"{hook}{v}{point}，{suffix}"
         events.append(_line_limit(line, 20))
     return events
 
 
-def _make_substitute_events(points: list[str]) -> list[str]:
+def _make_substitute_events(points: list[str], action_offset: int = 0, scene_offset: int = 0) -> list[str]:
     events: list[str] = []
     for idx, point in enumerate(points):
-        v = ACTION_POOL[idx % len(ACTION_POOL)]
-        suffix = SCENE_SUFFIX[idx % len(SCENE_SUFFIX)]
+        v = ACTION_POOL[(idx + action_offset) % len(ACTION_POOL)]
+        suffix = SCENE_SUFFIX[(idx + scene_offset) % len(SCENE_SUFFIX)]
         line = f"{point}道具会{v}你，{suffix}"
         events.append(_line_limit(line, 20))
     return events
 
 
-def _make_timeline_events(hooks: list[str], points: list[str]) -> list[str]:
+def _make_timeline_events(hooks: list[str], points: list[str], action_offset: int = 0, scene_offset: int = 0) -> list[str]:
     events: list[str] = []
     for idx, point in enumerate(points):
         t = hooks[idx] if idx < len(hooks) else f"时间{idx + 1}"
-        v = ACTION_POOL[idx % len(ACTION_POOL)]
-        suffix = SCENE_SUFFIX[idx % len(SCENE_SUFFIX)]
+        v = ACTION_POOL[(idx + action_offset) % len(ACTION_POOL)]
+        suffix = SCENE_SUFFIX[(idx + scene_offset) % len(SCENE_SUFFIX)]
         line = f"{t}{v}{point}，{suffix}"
         events.append(_line_limit(line, 20))
     return events
 
 
-def generate_imagery(method: str, hooks: list[str], keywords: list[str]) -> list[str]:
+def generate_imagery(method: str, hooks: list[str], keywords: list[str], diversify: bool = False) -> list[str]:
     points = (keywords or ["锚点A", "锚点B", "锚点C"])[:9]
+    action_offset = random.randint(0, len(ACTION_POOL) - 1) if diversify else 0
+    scene_offset = random.randint(0, len(SCENE_SUFFIX) - 1) if diversify else 0
 
     if method == "peg_method":
-        imagery = _make_peg_events(hooks, points)
+        imagery = _make_peg_events(hooks, points, action_offset=action_offset, scene_offset=scene_offset)
     elif method == "timeline_method":
-        imagery = _make_timeline_events(hooks, points)
+        imagery = _make_timeline_events(hooks, points, action_offset=action_offset, scene_offset=scene_offset)
     elif method == "substitute_method":
-        imagery = _make_substitute_events(points)
+        imagery = _make_substitute_events(points, action_offset=action_offset, scene_offset=scene_offset)
     else:
-        imagery = _make_link_events(points)
+        imagery = _make_link_events(points, action_offset=action_offset, scene_offset=scene_offset)
 
     validated = [line for line in imagery if _validate_line(line)]
     if len(validated) < 5:
