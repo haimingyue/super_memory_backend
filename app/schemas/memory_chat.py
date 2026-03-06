@@ -18,32 +18,22 @@ class SessionTask(BaseModel):
 
 
 class MemoryDraft(BaseModel):
-    type: str
-    typeLabel: str
-    method: str
-    methodLabel: str
+    contentType: str
+    hookSystem: str
+    memoryMethod: str
     keywords: list[str]
     imagery: list[str]
     recap: str
 
 
-class CardFormat(BaseModel):
+class MemoryCard(BaseModel):
     front: str
     back: str
 
 
-class MemoryCard(BaseModel):
-    question: str
-    answer: str
-    keywords: list[str]
-    imagery: list[str]
-    recap: str
-    cardFormat: CardFormat
-
-
 class SessionMessage(BaseModel):
     role: Literal["user", "assistant"]
-    type: Literal["text", "memory_draft", "memory_question", "memory_revision", "memory_final_card"]
+    type: Literal["text", "memory_draft", "memory_question", "memory_revision", "memory_card"]
     content: str
     timestamp: int
 
@@ -62,4 +52,3 @@ class MemoryChatResponse(BaseModel):
     replyText: str
     draft: Optional[MemoryDraft] = None
     finalCard: Optional[MemoryCard] = None
-

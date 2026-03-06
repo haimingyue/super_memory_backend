@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from app.schemas.memory_chat import MemoryChatResponse, MemoryDraft, MemorySession, SessionTask
-from app.services.llm_service import llm_service
-from app.services.memory_card_formatter import format_memory_card
-from app.services.memory_engine_service import build_memory_draft
+from app.services.memory_strategy_service import (
+    build_memory_card_from_draft,
+    revise_memory_strategy,
+    run_memory_strategy,
+)
 from app.services.memory_session_manager import session_manager
-from app.utils.parse_util import parse_user_input
+from app.memory_engine.parser import parse_user_input
 
 FINALIZE_HINTS = ("生成卡片", "导出卡片", "最终版", "final", "final card", "确认")
 
@@ -33,8 +35,9 @@ def _draft_to_text(draft: MemoryDraft, reply_type: str = "draft") -> str:
     header = "这是第一版记忆草稿：" if reply_type == "draft" else "已根据你的反馈完成修订："
     return (
         f"{header}\n"
-        f"题型：{draft.typeLabel}\n"
-        f"方法：{draft.methodLabel}\n"
+        f"内容类型：{draft.contentType}\n"
+        f"挂钩系统：{draft.hookSystem}\n"
+        f"记忆方法：{draft.memoryMethod}\n"
         f"关键词：{' / '.join(draft.keywords)}\n"
         "想象画面：\n"
         + "\n".join([f"{i + 1}. {line}" for i, line in enumerate(draft.imagery)])
@@ -54,19 +57,14 @@ def handle_memory_conversation(session: MemorySession, message: str) -> MemoryCh
     if _is_new_task_message(message):
         parsed = parse_user_input(message)
         session.task = SessionTask(question=parsed["question"], answerLines=parsed["answerLines"])
-        draft_data = build_memory_draft(
-            question=parsed["question"],
-            answer_lines=parsed["answerLines"],
-            raw_text=parsed["raw"],
-        )
+        draft_data = run_memory_strategy(message)
         draft = MemoryDraft(
-            type=draft_data["type"],
-            typeLabel=draft_data["typeLabel"],
-            method=draft_data["method"],
-            methodLabel=draft_data["methodLabel"],
-            keywords=draft_data["resultBlocks"]["keywords"],
-            imagery=draft_data["resultBlocks"]["imagery"],
-            recap=draft_data["resultBlocks"]["recap"],
+            contentType=draft_data["contentType"],
+            hookSystem=draft_data["hookSystem"],
+            memoryMethod=draft_data["memoryMethod"],
+            keywords=draft_data["keywords"],
+            imagery=draft_data["imagery"],
+            recap=draft_data["recap"],
         )
         session.draft = draft
         session.state = "draft_generated"
@@ -91,34 +89,30 @@ def handle_memory_conversation(session: MemorySession, message: str) -> MemoryCh
         )
 
     if _is_finalize_message(message):
-        card = format_memory_card(
-            question=session.task.question,
-            answer_lines=session.task.answerLines,
-            draft=session.draft,
+        card_data = build_memory_card_from_draft(
+            {
+                "question": session.task.question,
+                "keywords": session.draft.keywords,
+                "imagery": session.draft.imagery,
+                "recap": session.draft.recap,
+            }
         )
         session.state = "finalized"
         reply_text = "已生成最终记忆卡片，你可以直接复制或导出。"
-        session.history.append(session_manager.make_message("assistant", "memory_final_card", reply_text))
+        session.history.append(session_manager.make_message("assistant", "memory_card", reply_text))
         session_manager.save(session)
         return MemoryChatResponse(
             sessionId=session.sessionId,
             replyType="final_card",
             replyText=reply_text,
-            finalCard=card,
+            finalCard=card_data,
         )
 
-    revised = llm_service.revise_draft(
-        question=session.task.question,
-        answer_text="\n".join(session.task.answerLines),
-        draft=session.draft.model_dump(),
-        user_feedback=message,
-        history=[m.model_dump() for m in session.history],
-    )
+    revised = revise_memory_strategy(session.draft.model_dump(), message)
     draft = MemoryDraft(
-        type=session.draft.type,
-        typeLabel=session.draft.typeLabel,
-        method=session.draft.method,
-        methodLabel=session.draft.methodLabel,
+        contentType=session.draft.contentType,
+        hookSystem=session.draft.hookSystem,
+        memoryMethod=session.draft.memoryMethod,
         keywords=revised["keywords"],
         imagery=revised["imagery"],
         recap=revised["recap"],

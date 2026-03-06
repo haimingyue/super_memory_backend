@@ -364,6 +364,207 @@ class LLMService:
             "recap": recap,
         }
 
+    def generate_visual_imagery(
+        self,
+        question: str,
+        content_type: str,
+        hook_system: str,
+        memory_method: str,
+        concepts: list[str],
+        visual_anchors: list[str],
+        feedback: str = "",
+    ) -> list[str]:
+        """
+        基于视觉锚点生成“可闭眼想象”的事件序列。
+        要求每句是新事件，不复读模板。
+        """
+        prompt = f"""你是记忆大师，请只生成记忆画面句子(JSON数组)。
+
+题目：{question}
+内容类型：{content_type}
+挂钩系统：{hook_system}
+方法：{memory_method}
+概念序列：{json.dumps(concepts, ensure_ascii=False)}
+视觉锚点：{json.dumps(visual_anchors, ensure_ascii=False)}
+用户反馈：{feedback or "无"}
+
+硬规则：
+1) 生成 5~10 句，每句 <= 20 字，必须含具体物体+动作。
+2) 每句必须是“新的事件”，禁止句式循环。
+3) 禁止使用“撞”字。
+4) 禁止抽象解释，必须可视化。
+5) 最后一句必须是：现在闭上眼睛想象 5 秒
+
+只返回 JSON 数组，例如：
+["句1","句2","现在闭上眼睛想象 5 秒"]
+"""
+        response = self._invoke_with_timeout([HumanMessage(content=prompt)])
+        parsed = self._parse_json_response(response.content)
+        if not isinstance(parsed, list):
+            raise ValueError("LLM imagery 返回格式错误")
+
+        lines = [str(x).strip() for x in parsed if str(x).strip()]
+        lines = [line for line in lines if "撞" not in line]
+        lines = lines[:9]
+        if "现在闭上眼睛想象 5 秒" not in lines:
+            lines.append("现在闭上眼睛想象 5 秒")
+
+        if len(lines) < 5:
+            raise ValueError("LLM imagery 数量不足")
+        return lines[:10]
+
+    def plan_memory_strategy(
+        self,
+        question: str,
+        answer_lines: list[str],
+        raw_text: str = "",
+    ) -> dict:
+        """
+        由 LLM 直接完成策略规划 + 记忆草稿生成。
+        返回：
+        {
+          contentType, hookSystem, memoryMethod,
+          keywords, imagery, recap
+        }
+        """
+        prompt = f"""你是“记忆策略引擎”的策略规划器。请分析题目+答案，选择最合适记忆方案，并返回严格 JSON。
+
+输入题目：
+{question}
+
+输入答案行：
+{json.dumps(answer_lines, ensure_ascii=False)}
+
+原始输入：
+{raw_text}
+
+可选 contentType：
+sequence_list | numbered_list | alphabet_list | timeline | concept | large_list | compare_contrast
+
+可选 hookSystem：
+none_hooks | number_hooks | alphabet_hooks | date_hooks | space_hooks
+
+可选 memoryMethod：
+link_method | peg_method | substitute_method | timeline_method | contrast_method
+
+策略要求：
+1) 先判断信息结构，再选 hookSystem 与 method。
+2) 顺序结构优先 link_method；编号可 peg_method；时间线用 timeline_method；对比题优先 contrast_method。
+3) 不是所有题都要 hooks；如果不需要定位地址，选 none_hooks。
+4) keywords 必须是可视化锚点，不要抽象术语。
+5) imagery 5~10 句，每句有具体物体+动作，禁止“撞”，禁止抽象解释。
+6) imagery 最后一句固定：现在闭上眼睛想象 5 秒
+7) recap 简洁，能快速复述核心结构（顺序用箭头，对比用 A/B 结构）。
+
+只输出 JSON：
+{{
+  "contentType": "...",
+  "hookSystem": "...",
+  "memoryMethod": "...",
+  "keywords": ["..."],
+  "imagery": ["..."],
+  "recap": "..."
+}}
+"""
+        response = self._invoke_with_timeout([HumanMessage(content=prompt)])
+        parsed = self._parse_json_response(response.content)
+        if not isinstance(parsed, dict):
+            raise ValueError("LLM 策略规划返回格式错误")
+
+        content_type = str(parsed.get("contentType", "")).strip()
+        hook_system = str(parsed.get("hookSystem", "")).strip()
+        memory_method = str(parsed.get("memoryMethod", "")).strip()
+        keywords = parsed.get("keywords", [])
+        imagery = parsed.get("imagery", [])
+        recap = str(parsed.get("recap", "")).strip()
+
+        if not isinstance(keywords, list):
+            keywords = []
+        if not isinstance(imagery, list):
+            imagery = []
+        keywords = [str(x).strip() for x in keywords if str(x).strip()][:9]
+        imagery = [str(x).strip() for x in imagery if str(x).strip()][:10]
+
+        if "现在闭上眼睛想象 5 秒" not in imagery:
+            imagery = imagery[:9] + ["现在闭上眼睛想象 5 秒"]
+
+        if not content_type:
+            raise ValueError("LLM 缺少 contentType")
+        if not hook_system:
+            raise ValueError("LLM 缺少 hookSystem")
+        if not memory_method:
+            raise ValueError("LLM 缺少 memoryMethod")
+        if len(keywords) < 3:
+            raise ValueError("LLM keywords 不足")
+        if len(imagery) < 5:
+            raise ValueError("LLM imagery 不足")
+        if not recap:
+            raise ValueError("LLM recap 缺失")
+
+        return {
+            "contentType": content_type,
+            "hookSystem": hook_system,
+            "memoryMethod": memory_method,
+            "keywords": keywords[:9],
+            "imagery": imagery[:10],
+            "recap": recap,
+        }
+
+    def revise_memory_strategy(
+        self,
+        question: str,
+        answer_lines: list[str],
+        current_draft: dict,
+        feedback: str,
+    ) -> dict:
+        """
+        基于用户反馈修订整个策略草稿（不仅 imagery）。
+        """
+        prompt = f"""你是记忆策略引擎修订器。请基于用户反馈修订完整草稿，并输出严格 JSON。
+
+题目：
+{question}
+
+答案行：
+{json.dumps(answer_lines, ensure_ascii=False)}
+
+当前草稿：
+{json.dumps(current_draft, ensure_ascii=False)}
+
+用户反馈：
+{feedback}
+
+规则：
+1) 保持结构：contentType/hookSystem/memoryMethod/keywords/imagery/recap。
+2) 若反馈只改风格，不要乱改题型和方法。
+3) imagery 5~10 句，禁止“撞”，最后一句固定：现在闭上眼睛想象 5 秒。
+4) keywords 保持可视化。
+
+只输出 JSON。
+"""
+        response = self._invoke_with_timeout([HumanMessage(content=prompt)])
+        parsed = self._parse_json_response(response.content)
+        if not isinstance(parsed, dict):
+            raise ValueError("LLM 修订策略返回格式错误")
+
+        merged = {**current_draft, **parsed}
+        keywords = merged.get("keywords", [])
+        imagery = merged.get("imagery", [])
+        if not isinstance(keywords, list):
+            keywords = current_draft.get("keywords", [])
+        if not isinstance(imagery, list):
+            imagery = current_draft.get("imagery", [])
+        keywords = [str(x).strip() for x in keywords if str(x).strip()][:9]
+        imagery = [str(x).strip() for x in imagery if str(x).strip() and "撞" not in str(x)]
+        imagery = imagery[:10]
+        if "现在闭上眼睛想象 5 秒" not in imagery:
+            imagery = imagery[:9] + ["现在闭上眼睛想象 5 秒"]
+        merged["keywords"] = keywords
+        merged["imagery"] = imagery
+        if not merged.get("recap"):
+            merged["recap"] = current_draft.get("recap", "")
+        return merged
+
     def _invoke_with_timeout(self, messages):
         future = self._executor.submit(self.llm.invoke, messages)
         try:

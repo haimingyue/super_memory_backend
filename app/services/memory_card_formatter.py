@@ -6,7 +6,6 @@ from app.schemas.memory_chat import MemoryCard, MemoryDraft
 
 
 def format_memory_card(question: str, answer_lines: list[str], draft: MemoryDraft) -> MemoryCard:
-    answer = "\n".join(answer_lines)
     keywords_line = " → ".join(draft.keywords)
     imagery_text = "\n".join([f"{idx + 1}. {line}" for idx, line in enumerate(draft.imagery)])
     back = (
@@ -17,15 +16,4 @@ def format_memory_card(question: str, answer_lines: list[str], draft: MemoryDraf
         "快速复述：\n"
         f"{draft.recap}"
     )
-    return MemoryCard(
-        question=question,
-        answer=answer,
-        keywords=draft.keywords,
-        imagery=draft.imagery,
-        recap=draft.recap,
-        cardFormat={
-            "front": question,
-            "back": back,
-        },
-    )
-
+    return MemoryCard(front=question, back=back)
