@@ -4,8 +4,8 @@ import json
 import uuid
 
 
-def _build_back(keywords: list[str], imagery: list[str], recap: str) -> str:
-    return (
+def _build_back(keywords: list[str], imagery: list[str], recap: str, contrast_matrix: dict | None = None) -> str:
+    base = (
         "关键词：\n"
         + " → ".join(keywords)
         + "\n\n想象画面：\n"
@@ -13,6 +13,21 @@ def _build_back(keywords: list[str], imagery: list[str], recap: str) -> str:
         + "\n\n快速复述：\n"
         + recap
     )
+    if not contrast_matrix:
+        return base
+    a = contrast_matrix.get("a", []) or []
+    b = contrast_matrix.get("b", []) or []
+    common = contrast_matrix.get("common", []) or []
+    compare_text = (
+        "\n\n对比矩阵：\n"
+        + "TCP列："
+        + ("；".join([str(x).strip() for x in a if str(x).strip()]) or "-")
+        + "\nUDP列："
+        + ("；".join([str(x).strip() for x in b if str(x).strip()]) or "-")
+        + "\n共同点："
+        + ("；".join([str(x).strip() for x in common if str(x).strip()]) or "-")
+    )
+    return base + compare_text
 
 
 def _build_strategy_summary(strategy_ir: dict | None) -> dict:
@@ -41,9 +56,10 @@ def build_exportable_memory_card(
     imagery: list[str],
     recap: str,
     strategy_ir: dict | None = None,
+    contrast_matrix: dict | None = None,
 ) -> dict:
     front = question
-    back = _build_back(keywords, imagery, recap)
+    back = _build_back(keywords, imagery, recap, contrast_matrix=contrast_matrix)
     answer = "\n".join(answer_lines)
     strategy_summary = _build_strategy_summary(strategy_ir)
     anchors = (strategy_ir or {}).get("anchors", []) or []
@@ -54,6 +70,7 @@ def build_exportable_memory_card(
         "keywords": keywords,
         "imagery": imagery,
         "recap": recap,
+        "contrastMatrix": contrast_matrix,
         "strategySummary": strategy_summary,
         "quality": quality,
         "anchors": anchors,

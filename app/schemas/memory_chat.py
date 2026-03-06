@@ -24,6 +24,7 @@ class MemoryDraft(BaseModel):
     keywords: list[str]
     imagery: list[str]
     recap: str
+    contrastMatrix: Optional[dict] = None
 
 
 class MemoryCardStrategySummary(BaseModel):
@@ -121,6 +122,7 @@ class SessionMessage(BaseModel):
 class MemorySession(BaseModel):
     sessionId: str
     state: Literal["collecting_material", "draft_generated", "revising", "finalized"] = "collecting_material"
+    conversationMode: Literal["general_chat", "memory_flow"] = "general_chat"
     task: Optional[SessionTask] = None
     draft: Optional[MemoryDraft] = None
     finalCard: Optional[MemoryCard] = None
@@ -130,8 +132,12 @@ class MemorySession(BaseModel):
 
 class MemoryChatResponse(BaseModel):
     sessionId: str
-    replyType: Literal["draft", "question", "revision", "final_card"]
+    replyType: Literal["chat", "memory_draft", "memory_revision", "memory_card"]
     replyText: str
+    mode: Literal["general_chat", "memory_flow"]
+    triggeredBy: Optional[Literal["qa_pair", "memory_intent", "manual_revision", "finalize"]] = None
+    degraded: bool = False
+    degradeReason: Optional[Literal["llm_timeout", "invalid_llm_payload", "fallback_rule_engine", "none"]] = "none"
     draft: Optional[MemoryDraft] = None
     finalCard: Optional[MemoryCard] = None
     strategyIr: Optional[MemoryStrategyIR] = None

@@ -507,6 +507,53 @@ link_method | peg_method | substitute_method | timeline_method | contrast_method
         content_type = str(parsed.get("contentType", "")).strip()
         hook_system = str(parsed.get("hookSystem", "")).strip()
         memory_method = str(parsed.get("memoryMethod", "")).strip()
+
+        # 兼容常见别名，随后统一走白名单校验。
+        content_alias = {
+            "sequence": "sequence_list",
+            "numbered": "numbered_list",
+            "alphabet": "alphabet_list",
+            "compare": "compare_contrast",
+            "contrast": "compare_contrast",
+        }
+        hook_alias = {
+            "none": "none_hooks",
+            "number": "number_hooks",
+            "alphabet": "alphabet_hooks",
+            "date": "date_hooks",
+            "space": "space_hooks",
+        }
+        method_alias = {
+            "substitute_word_method": "substitute_method",
+            "space_method": "link_method",
+        }
+        content_type = content_alias.get(content_type, content_type)
+        hook_system = hook_alias.get(hook_system, hook_system)
+        memory_method = method_alias.get(memory_method, memory_method)
+
+        allowed_content_types = {
+            "sequence_list",
+            "numbered_list",
+            "alphabet_list",
+            "timeline",
+            "concept",
+            "large_list",
+            "compare_contrast",
+        }
+        allowed_hook_systems = {
+            "none_hooks",
+            "number_hooks",
+            "alphabet_hooks",
+            "date_hooks",
+            "space_hooks",
+        }
+        allowed_memory_methods = {
+            "link_method",
+            "peg_method",
+            "substitute_method",
+            "timeline_method",
+            "contrast_method",
+        }
         keywords = parsed.get("keywords", [])
         imagery = parsed.get("imagery", [])
         recap = str(parsed.get("recap", "")).strip()
@@ -527,6 +574,12 @@ link_method | peg_method | substitute_method | timeline_method | contrast_method
             raise ValueError("LLM 缺少 hookSystem")
         if not memory_method:
             raise ValueError("LLM 缺少 memoryMethod")
+        if content_type not in allowed_content_types:
+            raise ValueError(f"LLM contentType 非法: {content_type}")
+        if hook_system not in allowed_hook_systems:
+            raise ValueError(f"LLM hookSystem 非法: {hook_system}")
+        if memory_method not in allowed_memory_methods:
+            raise ValueError(f"LLM memoryMethod 非法: {memory_method}")
         if len(keywords) < 3:
             raise ValueError("LLM keywords 不足")
         if len(imagery) < 5:

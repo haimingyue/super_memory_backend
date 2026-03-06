@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from app.memory_engine import MemoryStrategyEngine
 from app.memory_engine.validator import validate_and_autofix_draft
 from app.memory_engine.visual_mapper import (
@@ -21,6 +23,24 @@ from app.services.revision_patch_service import (
 from app.services.llm_service import llm_service
 
 engine = MemoryStrategyEngine()
+logger = logging.getLogger(__name__)
+
+ALLOWED_CONTENT_TYPES = {
+    "sequence_list",
+    "numbered_list",
+    "alphabet_list",
+    "timeline",
+    "concept",
+    "large_list",
+    "compare_contrast",
+}
+ALLOWED_HOOK_SYSTEMS = {"none_hooks", "number_hooks", "alphabet_hooks", "date_hooks", "space_hooks"}
+ALLOWED_MEMORY_METHODS = {"link_method", "peg_method", "substitute_method", "timeline_method", "contrast_method"}
+
+METHOD_ALIAS = {
+    "substitute_word_method": "substitute_method",
+    "space_method": "link_method",
+}
 
 
 def _pick_memory_goal(content_type: str) -> str:
@@ -52,10 +72,10 @@ def _build_analysis_reason(content_type: str, method: str, hook_system: str) -> 
 
 def _infer_secondary_methods(primary_method: str, content_type: str) -> list[str]:
     default_map = {
-        "link_method": ["substitute_method"],
+        "link_method": ["substitute_word_method"],
         "peg_method": ["link_method"],
         "timeline_method": ["link_method"],
-        "contrast_method": ["substitute_method"],
+        "contrast_method": ["substitute_word_method"],
         "substitute_method": ["link_method"],
     }
     secondary = default_map.get(primary_method, ["link_method"])
@@ -76,15 +96,74 @@ def _infer_recap_style(recap: str) -> str:
 
 
 def _normalize_draft_payload(draft: dict, question: str, answer_lines: list[str]) -> dict:
+    content_type = str(draft.get("contentType", "concept")).strip() or "concept"
+    hook_system = str(draft.get("hookSystem", "none_hooks")).strip() or "none_hooks"
+    memory_method = str(draft.get("memoryMethod", "link_method")).strip() or "link_method"
+    memory_method = METHOD_ALIAS.get(memory_method, memory_method)
+
+    if content_type not in ALLOWED_CONTENT_TYPES:
+        content_type = "concept"
+    if hook_system not in ALLOWED_HOOK_SYSTEMS:
+        hook_system = "none_hooks"
+    if memory_method not in ALLOWED_MEMORY_METHODS:
+        memory_method = "link_method"
+
     return {
-        "contentType": str(draft.get("contentType", "concept")),
-        "hookSystem": str(draft.get("hookSystem", "none_hooks")),
-        "memoryMethod": str(draft.get("memoryMethod", "link_method")),
+        "contentType": content_type,
+        "hookSystem": hook_system,
+        "memoryMethod": memory_method,
         "keywords": [str(item).strip() for item in draft.get("keywords", []) if str(item).strip()][:9],
         "imagery": [str(item).strip() for item in draft.get("imagery", []) if str(item).strip()][:10],
         "recap": str(draft.get("recap", "")).strip(),
+        "contrastMatrix": draft.get("contrastMatrix"),
         "question": question,
         "answerLines": answer_lines,
+    }
+
+
+def _build_contrast_matrix(question: str, answer_lines: list[str], draft: dict) -> dict | None:
+    content_type = str(draft.get("contentType", "")).strip()
+    if content_type != "compare_contrast":
+        return None
+
+    a_rows: list[str] = []
+    b_rows: list[str] = []
+    common_rows: list[str] = []
+    for raw in answer_lines:
+        line = str(raw).strip()
+        lowered = line.lower()
+        if not line:
+            continue
+        if lowered.startswith("tcp"):
+            a_rows.append(line.split("：", 1)[-1].split(":", 1)[-1].strip() or line)
+        elif lowered.startswith("udp"):
+            b_rows.append(line.split("：", 1)[-1].split(":", 1)[-1].strip() or line)
+        elif "联系" in line or "共同" in line or "都" in line:
+            common_rows.append(line.split("：", 1)[-1].split(":", 1)[-1].strip() or line)
+
+    # 兜底拆分：当答案没写 TCP/UDP 前缀时，至少按顺序填充 A/B/Common。
+    if not a_rows and answer_lines:
+        a_rows = [answer_lines[0].strip()]
+    if not b_rows and len(answer_lines) > 1:
+        b_rows = [answer_lines[1].strip()]
+    if not common_rows and len(answer_lines) > 2:
+        common_rows = [answer_lines[2].strip()]
+
+    keywords = [str(x).strip() for x in draft.get("keywords", []) if str(x).strip()]
+    scenes = [str(x).strip() for x in draft.get("imagery", []) if str(x).strip() and "闭上眼睛" not in str(x)][:3]
+    if not scenes and keywords:
+        scenes = [f"{keywords[0]}对比{keywords[min(1, len(keywords) - 1)]}"][:1]
+    if not (a_rows or b_rows or common_rows):
+        return None
+    return {
+        "titleA": "TCP列",
+        "titleB": "UDP列",
+        "titleCommon": "共同点",
+        "a": a_rows[:3],
+        "b": b_rows[:3],
+        "common": common_rows[:3],
+        "scenes": scenes,
+        "question": question,
     }
 
 
@@ -197,6 +276,8 @@ def run_memory_strategy(raw_text: str) -> dict:
     parsed = engine.parse_user_input(raw_text)
     question = parsed["question"]
     answer_lines = parsed["answerLines"]
+    degraded = False
+    degrade_reason = "none"
     try:
         generated = llm_service.plan_memory_strategy(
             question=question,
@@ -204,10 +285,19 @@ def run_memory_strategy(raw_text: str) -> dict:
             raw_text=raw_text,
         )
         generation_source = "llm"
-    except Exception:
+    except TimeoutError as exc:
+        logger.warning("run_memory_strategy llm timeout, fallback to rule engine: %s", exc)
+        generated = engine.build_draft(raw_text)
+        generation_source = "fallback_rule_engine"
+        degraded = True
+        degrade_reason = "llm_timeout"
+    except Exception as exc:
+        logger.warning("run_memory_strategy llm invalid payload, fallback to rule engine: %s", exc)
         # 规则兜底
         generated = engine.build_draft(raw_text)
         generation_source = "fallback_rule_engine"
+        degraded = True
+        degrade_reason = "invalid_llm_payload"
 
     draft = _normalize_draft_payload(generated, question, answer_lines)
     strategy_ir = build_strategy_ir_from_draft(draft)
@@ -237,12 +327,18 @@ def run_memory_strategy(raw_text: str) -> dict:
     strategy_ir = build_strategy_ir_from_draft(draft)
     strategy_ir["analysis"]["reason"] = f"{strategy_ir['analysis']['reason']}（source={generation_source}）"
     strategy_ir, draft, quality = validate_and_autofix_draft(strategy_ir, draft)
+    draft["contrastMatrix"] = _build_contrast_matrix(question, answer_lines, draft)
     strategy_ir["quality"] = quality
     strategy_ir["outputPolicy"]["keywordCount"] = len(draft.get("keywords", []) or [])
     strategy_ir["outputPolicy"]["imagerySentenceCount"] = len(draft.get("imagery", []) or [])
     return {
         "draft": draft,
         "strategyIr": strategy_ir,
+        "meta": {
+            "generationSource": generation_source,
+            "degraded": degraded,
+            "degradeReason": degrade_reason if degraded else "none",
+        },
     }
 
 
@@ -279,6 +375,7 @@ def revise_memory_strategy(draft: dict, feedback: str, strategy_ir: dict | None 
         refreshed_ir["outputPolicy"]["keywordCount"] = len(patched_draft.get("keywords", []) or [])
         refreshed_ir["outputPolicy"]["imagerySentenceCount"] = len(patched_draft.get("imagery", []) or [])
     refreshed_ir, patched_draft, quality = validate_and_autofix_draft(refreshed_ir, patched_draft)
+    patched_draft["contrastMatrix"] = _build_contrast_matrix(question, answer_lines, patched_draft)
     refreshed_ir["quality"] = quality
     refreshed_ir["outputPolicy"]["keywordCount"] = len(patched_draft.get("keywords", []) or [])
     refreshed_ir["outputPolicy"]["imagerySentenceCount"] = len(patched_draft.get("imagery", []) or [])
@@ -286,6 +383,11 @@ def revise_memory_strategy(draft: dict, feedback: str, strategy_ir: dict | None 
     return {
         "draft": patched_draft,
         "strategyIr": refreshed_ir,
+        "meta": {
+            "generationSource": "patch_flow",
+            "degraded": False,
+            "degradeReason": "none",
+        },
     }
 
 
@@ -297,4 +399,5 @@ def build_memory_card_from_draft(draft: dict) -> dict:
         imagery=[str(x).strip() for x in draft.get("imagery", []) if str(x).strip()],
         recap=str(draft.get("recap", "")).strip(),
         strategy_ir=draft.get("strategyIr"),
+        contrast_matrix=draft.get("contrastMatrix"),
     )

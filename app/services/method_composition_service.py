@@ -113,7 +113,7 @@ def _apply_substitute_to_visual(source: str, visual: str) -> str:
 
 
 def apply_secondary_methods_to_anchors(anchors: list[dict], secondary_methods: list[str]) -> list[dict]:
-    if "substitute_word_method" not in secondary_methods:
+    if "substitute_word_method" not in secondary_methods and "substitute_method" not in secondary_methods:
         return anchors
 
     updated: list[dict] = []
