@@ -292,7 +292,7 @@ def _fix_abstract_anchors(strategy_ir: dict, draft: dict, abstract_indexes: list
 
 
 def _fix_imagery(strategy_ir: dict, draft: dict) -> tuple[dict, dict, list[str]]:
-    composed = generate_composed_draft_parts(strategy_ir, draft)
+    composed = generate_composed_draft_parts(strategy_ir, draft, diversify=True)
     draft["imagery"] = _ensure_last_imagery_line(composed["imagery"])
     return strategy_ir, draft, ["重生成 imagery（动作/句式优化）"]
 

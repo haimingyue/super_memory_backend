@@ -1,104 +1,53 @@
 from __future__ import annotations
 
-import random
+from app.services.llm_service import llm_service
 
-ACTION_POOL = [
-    "缠住",
-    "拖着",
-    "举起",
-    "喷出",
-    "吸走",
-    "点亮",
-    "推着",
-    "卷走",
-    "挂满",
-    "变成",
-]
-SCENE_SUFFIX = ["地板震动。", "天花板发亮。", "全场在尖叫。", "墙面被点燃。", "空气都在抖。", "灯牌狂闪。"]
-FORBIDDEN_WORDS = {"撞"}
+FINAL_LINE = "现在闭上眼睛想象 5 秒"
 
 
-def _line_limit(sentence: str, max_len: int = 20) -> str:
-    s = sentence.strip()
-    return s if len(s) <= max_len else s[:max_len]
+def _infer_content_type(method: str) -> str:
+    if method == "peg_method":
+        return "numbered_list"
+    if method == "timeline_method":
+        return "timeline"
+    if method == "substitute_method":
+        return "concept"
+    return "sequence_list"
 
 
-def _validate_line(line: str) -> bool:
-    if any(w in line for w in FORBIDDEN_WORDS):
-        return False
-    # 至少含一个动作词
-    if not any(v in line for v in ACTION_POOL):
-        return False
-    return True
+def _infer_hook_system(method: str, hooks: list[str]) -> str:
+    if not hooks:
+        return "none_hooks"
+    if method == "timeline_method":
+        return "date_hooks"
+    if method == "peg_method":
+        return "number_hooks"
+    return "none_hooks"
 
 
-def _make_link_events(points: list[str], action_offset: int = 0, scene_offset: int = 0) -> list[str]:
-    events: list[str] = []
-    for idx in range(len(points) - 1):
-        a = points[idx]
-        b = points[idx + 1]
-        v = ACTION_POOL[(idx + action_offset) % len(ACTION_POOL)]
-        suffix = SCENE_SUFFIX[(idx + scene_offset) % len(SCENE_SUFFIX)]
-        line = f"{a}{v}{b}，{suffix}"
-        events.append(_line_limit(line, 20))
-    return events
-
-
-def _make_peg_events(hooks: list[str], points: list[str], action_offset: int = 0, scene_offset: int = 0) -> list[str]:
-    events: list[str] = []
-    for idx, point in enumerate(points):
-        hook = hooks[idx] if idx < len(hooks) else f"钩子{idx + 1}"
-        v = ACTION_POOL[(idx + action_offset) % len(ACTION_POOL)]
-        suffix = SCENE_SUFFIX[(idx + scene_offset) % len(SCENE_SUFFIX)]
-        line = f"{hook}{v}{point}，{suffix}"
-        events.append(_line_limit(line, 20))
-    return events
-
-
-def _make_substitute_events(points: list[str], action_offset: int = 0, scene_offset: int = 0) -> list[str]:
-    events: list[str] = []
-    for idx, point in enumerate(points):
-        v = ACTION_POOL[(idx + action_offset) % len(ACTION_POOL)]
-        suffix = SCENE_SUFFIX[(idx + scene_offset) % len(SCENE_SUFFIX)]
-        line = f"{point}道具会{v}你，{suffix}"
-        events.append(_line_limit(line, 20))
-    return events
-
-
-def _make_timeline_events(hooks: list[str], points: list[str], action_offset: int = 0, scene_offset: int = 0) -> list[str]:
-    events: list[str] = []
-    for idx, point in enumerate(points):
-        t = hooks[idx] if idx < len(hooks) else f"时间{idx + 1}"
-        v = ACTION_POOL[(idx + action_offset) % len(ACTION_POOL)]
-        suffix = SCENE_SUFFIX[(idx + scene_offset) % len(SCENE_SUFFIX)]
-        line = f"{t}{v}{point}，{suffix}"
-        events.append(_line_limit(line, 20))
-    return events
+def _normalize_imagery(lines: list[str]) -> list[str]:
+    cleaned = [str(line).strip() for line in lines if str(line).strip()]
+    cleaned = [line for line in cleaned if "撞" not in line]
+    cleaned = [line for line in cleaned if line != FINAL_LINE]
+    cleaned = cleaned[:9]
+    cleaned.append(FINAL_LINE)
+    return cleaned[:10]
 
 
 def generate_imagery(method: str, hooks: list[str], keywords: list[str], diversify: bool = False) -> list[str]:
-    points = (keywords or ["锚点A", "锚点B", "锚点C"])[:9]
-    action_offset = random.randint(0, len(ACTION_POOL) - 1) if diversify else 0
-    scene_offset = random.randint(0, len(SCENE_SUFFIX) - 1) if diversify else 0
+    points = [str(x).strip() for x in (keywords or ["锚点A", "锚点B", "锚点C"]) if str(x).strip()][:9]
+    if len(points) < 3:
+        points.extend(["锚点A", "锚点B", "锚点C"])
+        points = points[:3]
 
-    if method == "peg_method":
-        imagery = _make_peg_events(hooks, points, action_offset=action_offset, scene_offset=scene_offset)
-    elif method == "timeline_method":
-        imagery = _make_timeline_events(hooks, points, action_offset=action_offset, scene_offset=scene_offset)
-    elif method == "substitute_method":
-        imagery = _make_substitute_events(points, action_offset=action_offset, scene_offset=scene_offset)
-    else:
-        imagery = _make_link_events(points, action_offset=action_offset, scene_offset=scene_offset)
-
-    validated = [line for line in imagery if _validate_line(line)]
-    if len(validated) < 5:
-        validated.extend(
-            [
-                "道具突然变大并推着你跑。",
-                "整条路线亮起并卷走云朵。",
-                "最后一个道具点亮终点牌。",
-            ]
-        )
-    validated = validated[:9]
-    validated.append("现在闭上眼睛想象 5 秒")
-    return validated[:10]
+    feedback = "请给出明显不同的新版本画面，避免重复句式。" if diversify else ""
+    lines = llm_service.generate_visual_imagery(
+        question="",
+        content_type=_infer_content_type(method),
+        hook_system=_infer_hook_system(method, hooks),
+        memory_method=method or "link_method",
+        concepts=points,
+        visual_anchors=points,
+        feedback=feedback,
+    )
+    return _normalize_imagery(lines)

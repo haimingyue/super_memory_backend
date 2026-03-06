@@ -29,6 +29,7 @@ class RevisionIntent:
     tone: str | None = None
     short_recap: bool = False
     diversify: bool = False
+    llm_preferred: bool = False
 
 
 @dataclass
@@ -86,16 +87,17 @@ def _infer_tone(feedback: str) -> str:
 def parse_revision_intent(feedback: str) -> RevisionIntent:
     text = (feedback or "").strip()
     lowered = text.lower()
+    short_recap = any(k in text for k in ["压缩", "简短", "精简", "更短", "再短"])
 
     if any(h in lowered for h in [h.lower() for h in FINALIZE_HINTS]):
         return RevisionIntent(intent_type="finalize_card")
     if any(k in text for k in ["换一个答案", "换一种", "换个版本", "再来一个", "不一样", "另一版"]):
-        return RevisionIntent(intent_type="revise_imagery", diversify=True)
+        return RevisionIntent(intent_type="revise_imagery", diversify=True, llm_preferred=True, short_recap=short_recap)
 
     if "复述" in text or "recap" in lowered:
         return RevisionIntent(
             intent_type="revise_recap",
-            short_recap=any(k in text for k in ["短", "精简", "简短", "更短"]),
+            short_recap=short_recap or any(k in text for k in ["短", "精简", "简短", "更短"]),
         )
 
     if "画面" in text or "想象" in text or "imagery" in lowered:
@@ -105,11 +107,17 @@ def parse_revision_intent(feedback: str) -> RevisionIntent:
                 intent_type="revise_anchor",
                 anchor_index=idx,
                 anchor_visual=_extract_anchor_visual(text),
+                short_recap=short_recap,
             )
-        return RevisionIntent(intent_type="revise_imagery")
+        return RevisionIntent(
+            intent_type="revise_imagery",
+            diversify=True,
+            llm_preferred=any(k in text for k in ["丰富", "生动", "不太好", "重写", "重新"]),
+            short_recap=short_recap,
+        )
 
-    if any(k in text for k in ["生活化", "日常", "夸张", "戏剧", "风格"]):
-        return RevisionIntent(intent_type="revise_style", tone=_infer_tone(text))
+    if any(k in text for k in ["生活化", "日常", "夸张", "戏剧", "风格", "丰富", "生动"]):
+        return RevisionIntent(intent_type="revise_style", tone=_infer_tone(text), short_recap=short_recap)
 
     idx = _extract_anchor_index(text)
     if idx is not None:
@@ -119,7 +127,7 @@ def parse_revision_intent(feedback: str) -> RevisionIntent:
             anchor_visual=_extract_anchor_visual(text),
         )
 
-    return RevisionIntent(intent_type="revise_imagery")
+    return RevisionIntent(intent_type="revise_imagery", llm_preferred=True, short_recap=short_recap)
 
 
 def _pick_anchor_visual_with_fallback(strategy_ir: dict, anchor_index: int, suggested_visual: str | None) -> str:
@@ -156,7 +164,14 @@ def build_revision_patches(intent: RevisionIntent, strategy_ir: dict, draft: dic
     if intent.intent_type == "revise_style":
         tone = intent.tone or _infer_tone(feedback)
         patches.append(StrategyPatch(op="update_output_policy", payload={"tone": tone}))
-        patches.append(StrategyPatch(op="regenerate_imagery_only", payload={"mode": "all"}))
+        patches.append(
+            StrategyPatch(
+                op="regenerate_imagery_only",
+                payload={"mode": "all", "llmPreferred": intent.llm_preferred, "feedback": feedback},
+            )
+        )
+        if intent.short_recap:
+            patches.append(StrategyPatch(op="regenerate_recap_only", payload={"short": True}))
         return patches
 
     if intent.intent_type == "revise_recap":
@@ -166,7 +181,19 @@ def build_revision_patches(intent: RevisionIntent, strategy_ir: dict, draft: dic
         return patches
 
     if intent.intent_type == "revise_imagery":
-        patches.append(StrategyPatch(op="regenerate_imagery_only", payload={"mode": "all", "diversify": intent.diversify}))
+        patches.append(
+            StrategyPatch(
+                op="regenerate_imagery_only",
+                payload={
+                    "mode": "all",
+                    "diversify": intent.diversify,
+                    "llmPreferred": intent.llm_preferred,
+                    "feedback": feedback,
+                },
+            )
+        )
+        if intent.short_recap:
+            patches.append(StrategyPatch(op="regenerate_recap_only", payload={"short": True}))
         return patches
 
     return patches
@@ -206,11 +233,28 @@ def _regenerate_imagery(
     mode: str,
     anchor_index: int | None = None,
     diversify: bool = False,
+    llm_preferred: bool = False,
+    feedback: str = "",
 ) -> list[str]:
     composed = generate_composed_draft_parts(strategy_ir, draft, diversify=diversify)
     regenerated_all = _ensure_last_imagery_line(composed["imagery"])
     visuals = composed["keywords"]
     method = str(strategy_ir.get("strategy", {}).get("primaryMethod") or draft.get("memoryMethod", "link_method"))
+
+    if llm_preferred:
+        try:
+            llm_lines = llm_service.generate_visual_imagery(
+                question=str(strategy_ir.get("task", {}).get("question", "")),
+                content_type=str(strategy_ir.get("analysis", {}).get("contentType", "")),
+                hook_system=str(strategy_ir.get("strategy", {}).get("hookPolicy", {}).get("hookSystem", "none_hooks")),
+                memory_method=method,
+                concepts=[str(a.get("source", "")).strip() for a in strategy_ir.get("anchors", []) if str(a.get("source", "")).strip()],
+                visual_anchors=visuals,
+                feedback=feedback or "请更具体、更有动作",
+            )
+            regenerated_all = _ensure_last_imagery_line(llm_lines)
+        except Exception:
+            pass
 
     if mode == "all" or anchor_index is None:
         return regenerated_all
@@ -259,12 +303,16 @@ def apply_revision_patches(strategy_ir: dict, draft: dict, patches: list[Strateg
             mode = str(patch.payload.get("mode", "all"))
             anchor_index = patch.payload.get("anchorIndex")
             diversify = bool(patch.payload.get("diversify", False))
+            llm_preferred = bool(patch.payload.get("llmPreferred", False))
+            feedback = str(patch.payload.get("feedback", "")).strip()
             imagery = _regenerate_imagery(
                 updated_ir,
                 updated_draft,
                 mode=mode,
                 anchor_index=anchor_index,
                 diversify=diversify,
+                llm_preferred=llm_preferred,
+                feedback=feedback,
             )
             updated_draft["imagery"] = imagery
 
