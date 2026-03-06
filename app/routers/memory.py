@@ -7,8 +7,11 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Optional
 
+from app.schemas.memory_chat import MemoryChatRequest
 from app.schemas.memory_engine import MemorySolveRequest
+from app.services.memory_conversation_handler import handle_memory_conversation
 from app.services.memory_engine_service import run_memory_engine
+from app.services.memory_session_manager import session_manager
 
 router = APIRouter(prefix="/api/memory", tags=["记忆管理"])
 
@@ -62,6 +65,19 @@ async def solve_memory(request: MemorySolveRequest):
         return JSONResponse(status_code=400, content={"ok": False, "message": str(exc)})
     except Exception:
         return JSONResponse(status_code=500, content={"ok": False, "message": "记忆引擎处理失败"})
+
+
+@router.post("/chat")
+async def memory_chat(request: MemoryChatRequest):
+    """记忆共创对话接口：支持会话、草稿修订、最终卡片生成"""
+    try:
+        session = session_manager.get_or_create(request.sessionId)
+        response = handle_memory_conversation(session, request.message)
+        return response.model_dump()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="记忆共创对话失败") from exc
 
 
 @router.get("")

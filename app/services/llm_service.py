@@ -281,6 +281,89 @@ class LLMService:
             "recap": recap,
         }
 
+    def revise_draft(
+        self,
+        question: str,
+        answer_text: str,
+        draft: dict,
+        user_feedback: str,
+        history: list[dict] | None = None,
+    ) -> dict:
+        """
+        根据用户反馈修订记忆草稿。
+        draft 结构：
+        {"type","typeLabel","method","methodLabel","keywords","imagery","recap"}
+        """
+        history_text = ""
+        if history:
+            lines = []
+            for item in history[-8:]:
+                role = item.get("role", "")
+                content = (item.get("content") or "").strip()
+                if content:
+                    lines.append(f"{role}: {content}")
+            history_text = "\n".join(lines)
+
+        prompt = f"""你是记忆共创助手。请根据用户反馈修订草稿并输出严格 JSON。
+
+题目：
+{question}
+
+答案：
+{answer_text}
+
+当前草稿：
+{json.dumps(draft, ensure_ascii=False)}
+
+对话历史（可选）：
+{history_text or "无"}
+
+用户本轮反馈：
+{user_feedback}
+
+只输出 JSON：
+{{
+  "keywords": ["..."],
+  "imagery": ["..."],
+  "recap": "..."
+}}
+
+约束：
+1) keywords 3~9 个。
+2) imagery 4~9 句，必须包含：现在闭上眼睛想象 5 秒
+3) recap 与当前草稿题型兼容（顺序箭头 / 编号映射 / 对比格式）。
+"""
+        response = self._invoke_with_timeout([HumanMessage(content=prompt)])
+        parsed = self._parse_json_response(response.content)
+        if not isinstance(parsed, dict):
+            raise ValueError("LLM 修订返回格式错误")
+
+        keywords = parsed.get("keywords", draft.get("keywords", []))
+        imagery = parsed.get("imagery", draft.get("imagery", []))
+        recap = str(parsed.get("recap", draft.get("recap", ""))).strip()
+
+        if not isinstance(keywords, list):
+            keywords = draft.get("keywords", [])
+        if not isinstance(imagery, list):
+            imagery = draft.get("imagery", [])
+
+        keywords = [str(x).strip() for x in keywords if str(x).strip()][:9]
+        imagery = [str(x).strip() for x in imagery if str(x).strip()][:9]
+        if len(keywords) < 3:
+            keywords = (draft.get("keywords") or [])[:9]
+        if len(imagery) < 4:
+            imagery = (draft.get("imagery") or [])[:9]
+        if "现在闭上眼睛想象 5 秒" not in imagery:
+            imagery = imagery[:8] + ["现在闭上眼睛想象 5 秒"]
+        if not recap:
+            recap = str(draft.get("recap", ""))
+
+        return {
+            "keywords": keywords[:9],
+            "imagery": imagery[:9],
+            "recap": recap,
+        }
+
     def _invoke_with_timeout(self, messages):
         future = self._executor.submit(self.llm.invoke, messages)
         try:
