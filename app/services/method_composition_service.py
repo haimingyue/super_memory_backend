@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.memory_engine.generators import generate_imagery
+from app.memory_engine.generators import generate_imagery, generate_imagery_structured
 
 ABSTRACT_WORDS = {
     "能力",
@@ -213,7 +213,16 @@ def generate_composed_draft_parts(strategy_ir: dict, draft: dict, diversify: boo
 
     hooks = _build_hooks_from_ir(strategy_ir)
     method_for_generation = _resolve_generation_method(primary)
-    imagery = generate_imagery(method=method_for_generation, hooks=hooks, keywords=keywords, diversify=diversify)
+    generated = generate_imagery_structured(
+        method=method_for_generation,
+        hooks=hooks,
+        keywords=keywords,
+        diversify=diversify,
+        topic=str(strategy_ir.get("task", {}).get("question", "")).strip(),
+        content_type=str(strategy_ir.get("analysis", {}).get("contentType", "")).strip(),
+        previous_strategy=draft.get("memoryPlan") if isinstance(draft.get("memoryPlan"), dict) else None,
+    )
+    imagery = generated["imagery"] if generated.get("imagery") else generate_imagery(method=method_for_generation, hooks=hooks, keywords=keywords, diversify=diversify)
     imagery = _apply_tone(imagery, tone)
     imagery = _ensure_last_imagery_line(imagery)
 
@@ -223,4 +232,5 @@ def generate_composed_draft_parts(strategy_ir: dict, draft: dict, diversify: boo
         "imagery": imagery,
         "recap": recap,
         "anchors": anchors,
+        "memoryPlan": generated.get("strategy"),
     }

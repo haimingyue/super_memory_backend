@@ -21,6 +21,7 @@ from app.services.revision_patch_service import (
     parse_revision_intent,
 )
 from app.services.llm_service import llm_service
+from app.services.memory_llm_generator import polish_memory_story_with_llm, build_rule_story
 
 engine = MemoryStrategyEngine()
 logger = logging.getLogger(__name__)
@@ -116,6 +117,7 @@ def _normalize_draft_payload(draft: dict, question: str, answer_lines: list[str]
         "imagery": [str(item).strip() for item in draft.get("imagery", []) if str(item).strip()][:10],
         "recap": str(draft.get("recap", "")).strip(),
         "contrastMatrix": draft.get("contrastMatrix"),
+        "memoryPlan": draft.get("memoryPlan"),
         "question": question,
         "answerLines": answer_lines,
     }
@@ -167,6 +169,90 @@ def _build_contrast_matrix(question: str, answer_lines: list[str], draft: dict) 
     }
 
 
+def _sync_memory_plan_with_imagery(draft: dict, question: str) -> dict:
+    """Keep imagery and memoryPlan aligned so UI story/scene stay consistent.
+
+    Rule:
+    - imagery is the source of truth for display sequence
+    - memoryPlan.memory_scenes and final_readable_story are rebuilt from imagery
+    - keep existing keyword_visuals/quality when available
+    """
+    imagery = [str(x).strip() for x in draft.get("imagery", []) if str(x).strip()]
+    keywords = [str(x).strip() for x in draft.get("keywords", []) if str(x).strip()]
+    if not imagery:
+        return draft
+
+    plan = draft.get("memoryPlan") if isinstance(draft.get("memoryPlan"), dict) else {}
+    method = str(draft.get("memoryMethod", plan.get("method", "link_method"))).strip() or "link_method"
+    topic = str(question or plan.get("topic", "")).strip()
+    keyword_visuals = plan.get("keyword_visuals", []) if isinstance(plan.get("keyword_visuals"), list) else []
+    quality = plan.get("quality", {"issues": [], "source": "sync_from_imagery"})
+
+    scenes = _build_scene_chain_from_imagery(imagery=imagery, keywords=keywords, method=method)
+    polished_story, story_meta = _build_polished_story_from_scenes(
+        topic=topic,
+        method=method,
+        keywords=keywords,
+        scenes=scenes,
+    )
+
+    draft["memoryPlan"] = {
+        "method": method,
+        "topic": topic,
+        "keywords": keywords,
+        "keyword_visuals": keyword_visuals,
+        "memory_scenes": scenes[:10],
+        "final_readable_story": polished_story,
+        "storyMeta": story_meta,
+        "quality": quality,
+    }
+    return draft
+
+
+def _build_scene_chain_from_imagery(*, imagery: list[str], keywords: list[str], method: str) -> list[dict]:
+    scene_lines = [line for line in imagery if line != "现在闭上眼睛想象 5 秒"]
+    if not scene_lines:
+        scene_lines = imagery[:]
+
+    method_type = method.replace("_method", "")
+    scenes: list[dict] = []
+    for idx, line in enumerate(scene_lines):
+        frm = keywords[idx] if idx < len(keywords) else (keywords[-1] if keywords else "")
+        to = keywords[idx + 1] if idx + 1 < len(keywords) else "闭眼想象"
+        scenes.append(
+            {
+                "scene_id": idx + 1,
+                "type": method_type,
+                "from": frm,
+                "to": to,
+                "scene": line,
+                "why_memorable": "与想象画面一致，便于串联复述",
+            }
+        )
+    return scenes[:10]
+
+
+def _build_polished_story_from_scenes(*, topic: str, method: str, keywords: list[str], scenes: list[dict]) -> tuple[str, dict]:
+    polished = polish_memory_story_with_llm(
+        topic=topic,
+        method=method,
+        keywords=keywords,
+        scenes=scenes,
+    )
+    story = str(polished.get("final_readable_story", "")).strip()
+    if not story:
+        story = build_rule_story(scenes)
+    meta = polished.get("storyMeta", {})
+    if not isinstance(meta, dict):
+        meta = {
+            "style": "story_first",
+            "source": "rule_fallback",
+            "aligned": False,
+            "issues": ["storyMeta 非法，使用回退"],
+        }
+    return story, meta
+
+
 def _apply_anchors_to_draft(draft: dict, strategy_ir: dict, regenerate_imagery: bool = True) -> dict:
     anchors = strategy_ir.get("anchors", []) or []
     visuals = [str(item.get("visual", "")).strip() for item in anchors if str(item.get("visual", "")).strip()]
@@ -188,6 +274,7 @@ def _apply_anchors_to_draft(draft: dict, strategy_ir: dict, regenerate_imagery: 
             draft["imagery"] = regenerated
         draft["keywords"] = composed["keywords"]
         draft["recap"] = composed["recap"]
+        draft["memoryPlan"] = composed.get("memoryPlan")
 
     return draft
 
@@ -315,18 +402,26 @@ def run_memory_strategy(raw_text: str) -> dict:
                 draft["imagery"] = composed["imagery"]
             if not draft.get("recap"):
                 draft["recap"] = composed["recap"]
+            if composed.get("memoryPlan"):
+                draft["memoryPlan"] = composed.get("memoryPlan")
+        elif not draft.get("memoryPlan"):
+            composed = generate_composed_draft_parts(strategy_ir, draft)
+            if composed.get("memoryPlan"):
+                draft["memoryPlan"] = composed.get("memoryPlan")
     else:
         draft = _apply_anchors_to_draft(draft, strategy_ir)
         composed = generate_composed_draft_parts(strategy_ir, draft)
         draft["keywords"] = composed["keywords"]
         draft["imagery"] = composed["imagery"]
         draft["recap"] = composed["recap"]
+        draft["memoryPlan"] = composed.get("memoryPlan")
         draft["memoryMethod"] = strategy_ir.get("strategy", {}).get("primaryMethod", draft.get("memoryMethod"))
         draft["hookSystem"] = strategy_ir.get("strategy", {}).get("hookPolicy", {}).get("hookSystem", draft.get("hookSystem"))
 
     strategy_ir = build_strategy_ir_from_draft(draft)
     strategy_ir["analysis"]["reason"] = f"{strategy_ir['analysis']['reason']}（source={generation_source}）"
     strategy_ir, draft, quality = validate_and_autofix_draft(strategy_ir, draft)
+    draft = _sync_memory_plan_with_imagery(draft, question)
     draft["contrastMatrix"] = _build_contrast_matrix(question, answer_lines, draft)
     strategy_ir["quality"] = quality
     strategy_ir["outputPolicy"]["keywordCount"] = len(draft.get("keywords", []) or [])
@@ -366,6 +461,8 @@ def revise_memory_strategy(draft: dict, feedback: str, strategy_ir: dict | None 
         patched_draft["imagery"] = composed["imagery"]
     if not patched_draft.get("recap"):
         patched_draft["recap"] = composed["recap"]
+    if composed.get("memoryPlan"):
+        patched_draft["memoryPlan"] = composed.get("memoryPlan")
     patched_draft["memoryMethod"] = patched_ir.get("strategy", {}).get("primaryMethod", patched_draft.get("memoryMethod"))
     patched_draft["hookSystem"] = patched_ir.get("strategy", {}).get("hookPolicy", {}).get("hookSystem", patched_draft.get("hookSystem"))
     refreshed_ir = build_strategy_ir_from_draft(patched_draft)
@@ -375,6 +472,7 @@ def revise_memory_strategy(draft: dict, feedback: str, strategy_ir: dict | None 
         refreshed_ir["outputPolicy"]["keywordCount"] = len(patched_draft.get("keywords", []) or [])
         refreshed_ir["outputPolicy"]["imagerySentenceCount"] = len(patched_draft.get("imagery", []) or [])
     refreshed_ir, patched_draft, quality = validate_and_autofix_draft(refreshed_ir, patched_draft)
+    patched_draft = _sync_memory_plan_with_imagery(patched_draft, question)
     patched_draft["contrastMatrix"] = _build_contrast_matrix(question, answer_lines, patched_draft)
     refreshed_ir["quality"] = quality
     refreshed_ir["outputPolicy"]["keywordCount"] = len(patched_draft.get("keywords", []) or [])
@@ -400,4 +498,5 @@ def build_memory_card_from_draft(draft: dict) -> dict:
         recap=str(draft.get("recap", "")).strip(),
         strategy_ir=draft.get("strategyIr"),
         contrast_matrix=draft.get("contrastMatrix"),
+        memory_plan=draft.get("memoryPlan"),
     )

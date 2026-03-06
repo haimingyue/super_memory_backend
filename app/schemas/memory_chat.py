@@ -25,6 +25,7 @@ class MemoryDraft(BaseModel):
     imagery: list[str]
     recap: str
     contrastMatrix: Optional[dict] = None
+    memoryPlan: Optional[dict] = None
 
 
 class MemoryCardStrategySummary(BaseModel):

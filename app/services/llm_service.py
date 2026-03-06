@@ -659,6 +659,15 @@ link_method | peg_method | substitute_method | timeline_method | contrast_method
             future.cancel()
             raise TimeoutError(f"LLM 调用超时（>{self._timeout_seconds}s）")
 
+    def run_structured_json_prompt(self, system_prompt: str, user_prompt: str) -> dict | list:
+        """Run a prompt pair and parse JSON response."""
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ]
+        response = self._invoke_with_timeout(messages)
+        return self._parse_json_response(response.content)
+
     @staticmethod
     def _parse_json_response(content: str) -> dict | list:
         """解析 JSON 响应"""

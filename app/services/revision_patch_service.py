@@ -11,6 +11,7 @@ from app.services.method_composition_service import (
     generate_composed_draft_parts,
 )
 from app.services.llm_service import llm_service
+from app.services.memory_llm_generator import generate_memory_strategy_with_llm
 
 RevisionIntentType = Literal["revise_anchor", "revise_style", "revise_imagery", "revise_recap", "finalize_card"]
 PatchOpType = Literal[
@@ -243,16 +244,24 @@ def _regenerate_imagery(
 
     if llm_preferred:
         try:
-            llm_lines = llm_service.generate_visual_imagery(
-                question=str(strategy_ir.get("task", {}).get("question", "")),
+            structured = generate_memory_strategy_with_llm(
+                method=method,
+                topic=str(strategy_ir.get("task", {}).get("question", "")),
+                keywords=visuals,
                 content_type=str(strategy_ir.get("analysis", {}).get("contentType", "")),
                 hook_system=str(strategy_ir.get("strategy", {}).get("hookPolicy", {}).get("hookSystem", "none_hooks")),
-                memory_method=method,
-                concepts=[str(a.get("source", "")).strip() for a in strategy_ir.get("anchors", []) if str(a.get("source", "")).strip()],
-                visual_anchors=visuals,
                 feedback=feedback or "请更具体、更有动作",
+                previous_strategy=draft.get("memoryPlan") if isinstance(draft.get("memoryPlan"), dict) else None,
             )
+            llm_lines = [
+                str(item.get("scene", "")).strip()
+                for item in structured.get("memory_scenes", [])
+                if isinstance(item, dict) and str(item.get("scene", "")).strip()
+            ]
             regenerated_all = _ensure_last_imagery_line(llm_lines)
+            updated_plan = structured if isinstance(structured, dict) else None
+            if updated_plan:
+                draft["memoryPlan"] = updated_plan
         except Exception:
             pass
 

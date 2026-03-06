@@ -87,6 +87,26 @@ class TestMemoryStrategyService(unittest.TestCase):
         self.assertEqual(result["meta"]["degradeReason"], "llm_timeout")
         self.assertIn("contrastMatrix", result["draft"])
 
+    def test_sync_memory_plan_adds_story_meta(self):
+        draft = {
+            "memoryMethod": "link_method",
+            "keywords": ["电线", "网线", "路由器"],
+            "imagery": ["电线缠住网线", "网线插入路由器", "现在闭上眼睛想象 5 秒"],
+            "memoryPlan": {},
+        }
+        with patch.object(
+            mss,
+            "polish_memory_story_with_llm",
+            return_value={
+                "final_readable_story": "先看到电线缠住网线，随后网线插入路由器，最后闭眼回想。",
+                "storyMeta": {"style": "story_first", "source": "llm_polish", "aligned": True, "issues": []},
+            },
+        ):
+            synced = mss._sync_memory_plan_with_imagery(draft, "OSI")
+        self.assertIn("memoryPlan", synced)
+        self.assertIn("final_readable_story", synced["memoryPlan"])
+        self.assertEqual(synced["memoryPlan"]["storyMeta"]["source"], "llm_polish")
+
 
 if __name__ == "__main__":
     unittest.main()

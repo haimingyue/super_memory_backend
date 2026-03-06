@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.services.llm_service import llm_service
+from app.services.memory_llm_generator import generate_memory_strategy_with_llm
 
 FINAL_LINE = "现在闭上眼睛想象 5 秒"
 
@@ -34,20 +34,48 @@ def _normalize_imagery(lines: list[str]) -> list[str]:
     return cleaned[:10]
 
 
-def generate_imagery(method: str, hooks: list[str], keywords: list[str], diversify: bool = False) -> list[str]:
+def generate_imagery_structured(
+    *,
+    method: str,
+    hooks: list[str],
+    keywords: list[str],
+    topic: str = "",
+    content_type: str = "",
+    feedback: str = "",
+    diversify: bool = False,
+    previous_strategy: dict | None = None,
+) -> dict:
     points = [str(x).strip() for x in (keywords or ["锚点A", "锚点B", "锚点C"]) if str(x).strip()][:9]
     if len(points) < 3:
         points.extend(["锚点A", "锚点B", "锚点C"])
         points = points[:3]
 
-    feedback = "请给出明显不同的新版本画面，避免重复句式。" if diversify else ""
-    lines = llm_service.generate_visual_imagery(
-        question="",
-        content_type=_infer_content_type(method),
+    strategy = generate_memory_strategy_with_llm(
+        method=method or "link_method",
+        topic=topic or "记忆任务",
+        keywords=points,
+        content_type=content_type or _infer_content_type(method),
         hook_system=_infer_hook_system(method, hooks),
-        memory_method=method or "link_method",
-        concepts=points,
-        visual_anchors=points,
+        context=f"hooks={hooks}" if hooks else "",
         feedback=feedback,
+        previous_strategy=previous_strategy,
+        diversify=diversify,
     )
-    return _normalize_imagery(lines)
+    scenes = strategy.get("memory_scenes", []) if isinstance(strategy, dict) else []
+    lines = [str(item.get("scene", "")).strip() for item in scenes if isinstance(item, dict) and str(item.get("scene", "")).strip()]
+    imagery = _normalize_imagery(lines)
+    return {
+        "imagery": imagery,
+        "strategy": strategy,
+    }
+
+
+def generate_imagery(method: str, hooks: list[str], keywords: list[str], diversify: bool = False) -> list[str]:
+    generated = generate_imagery_structured(
+        method=method,
+        hooks=hooks,
+        keywords=keywords,
+        diversify=diversify,
+        feedback="请给出明显不同的新版本画面，避免重复句式。" if diversify else "",
+    )
+    return generated["imagery"]

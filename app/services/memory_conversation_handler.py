@@ -185,6 +185,7 @@ def handle_memory_conversation(session: MemorySession, message: str) -> MemoryCh
                 "imagery": session.draft.imagery,
                 "recap": session.draft.recap,
                 "contrastMatrix": session.draft.contrastMatrix,
+                "memoryPlan": session.draft.memoryPlan,
                 "strategyIr": session.strategyIr.model_dump() if session.strategyIr else None,
             }
         )
@@ -230,6 +231,7 @@ def handle_memory_conversation(session: MemorySession, message: str) -> MemoryCh
             imagery=draft_data["imagery"],
             recap=draft_data["recap"],
             contrastMatrix=draft_data.get("contrastMatrix"),
+            memoryPlan=draft_data.get("memoryPlan"),
         )
         session.draft = draft
         if strategy_data.get("strategyIr"):
@@ -332,6 +334,7 @@ def handle_memory_conversation(session: MemorySession, message: str) -> MemoryCh
             imagery=revised["imagery"],
             recap=revised["recap"],
             contrastMatrix=revised.get("contrastMatrix"),
+            memoryPlan=revised.get("memoryPlan"),
         )
         session.draft = draft
         if revised_payload.get("strategyIr"):

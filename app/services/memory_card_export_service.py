@@ -57,6 +57,7 @@ def build_exportable_memory_card(
     recap: str,
     strategy_ir: dict | None = None,
     contrast_matrix: dict | None = None,
+    memory_plan: dict | None = None,
 ) -> dict:
     front = question
     back = _build_back(keywords, imagery, recap, contrast_matrix=contrast_matrix)
@@ -71,6 +72,7 @@ def build_exportable_memory_card(
         "imagery": imagery,
         "recap": recap,
         "contrastMatrix": contrast_matrix,
+        "memoryPlan": memory_plan,
         "strategySummary": strategy_summary,
         "quality": quality,
         "anchors": anchors,
