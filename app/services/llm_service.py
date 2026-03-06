@@ -1,7 +1,9 @@
 """
 LangChain + 通义千问 LLM 服务
 """
+import json
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Optional
 
@@ -211,6 +213,74 @@ class LLMService:
             logger.error(f"内容扩展失败：{e}")
             return brief
 
+    def generate_memory_blocks(
+        self,
+        question: str,
+        answer_text: str,
+        memory_type: str,
+        type_label: str,
+        method: str,
+        method_label: str,
+    ) -> dict:
+        """
+        使用大模型生成 Memory Engine 的结构化 blocks。
+        返回格式：
+        {"keywords": [...], "imagery": [...], "recap": "..."}
+        """
+        prompt = f"""你是“记忆引擎”文案专家。请根据输入生成严格 JSON。
+
+输入信息：
+- 题目：{question}
+- 答案：{answer_text}
+- 题型：{memory_type}（{type_label}）
+- 记忆方法：{method}（{method_label}）
+
+输出 JSON 要求（只输出 JSON，不要 markdown）：
+{{
+  "keywords": ["词1","词2","词3"],
+  "imagery": ["句子1","句子2","句子3","句子4"],
+  "recap": "..."
+}}
+
+硬性约束：
+1) keywords 数量 3~9，尽量具体、可画面化，避免抽象词。
+2) imagery 数量 4~9，荒谬、夸张、带动作，尽量一条对应一个要点。
+3) imagery 中必须包含完全一致的一句：现在闭上眼睛想象 5 秒
+4) recap 规则：
+   - sequence_list/general/concept_definition/number_or_code：A → B → C 形式
+   - numbered_list：1=...;2=...;3=... 形式
+   - compare_contrast：A(锚点)=... | B(锚点)=... + 关键差异短句
+"""
+
+        response = self._invoke_with_timeout([HumanMessage(content=prompt)])
+        parsed = self._parse_json_response(response.content)
+        if not isinstance(parsed, dict):
+            raise ValueError("LLM 返回格式错误：非 JSON 对象")
+
+        keywords = parsed.get("keywords", [])
+        imagery = parsed.get("imagery", [])
+        recap = str(parsed.get("recap", "")).strip()
+
+        if not isinstance(keywords, list):
+            keywords = []
+        if not isinstance(imagery, list):
+            imagery = []
+
+        keywords = [str(x).strip() for x in keywords if str(x).strip()][:9]
+        imagery = [str(x).strip() for x in imagery if str(x).strip()][:9]
+
+        if len(keywords) < 3 or len(imagery) < 4 or not recap:
+            raise ValueError("LLM 返回字段不完整")
+
+        if "现在闭上眼睛想象 5 秒" not in imagery:
+            imagery = imagery[:8] + ["现在闭上眼睛想象 5 秒"]
+
+        return {
+            "keywords": keywords[:9],
+            "imagery": imagery[:9],
+            "recap": recap,
+        }
+
     def _invoke_with_timeout(self, messages):
         future = self._executor.submit(self.llm.invoke, messages)
         try:
@@ -222,8 +292,6 @@ class LLMService:
     @staticmethod
     def _parse_json_response(content: str) -> dict | list:
         """解析 JSON 响应"""
-        import json
-
         # 清理可能的 markdown 标记
         content = content.strip()
         if content.startswith("```json"):
@@ -232,8 +300,15 @@ class LLMService:
             content = content[3:]
         if content.endswith("```"):
             content = content[:-3]
-
-        return json.loads(content.strip())
+        cleaned = content.strip()
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            # 兜底：提取首个 JSON 对象/数组
+            match = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", cleaned)
+            if not match:
+                raise
+            return json.loads(match.group(1))
 
 
 # 全局服务实例

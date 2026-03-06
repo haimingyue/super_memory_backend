@@ -2,9 +2,13 @@
 记忆管理路由
 """
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Optional
+
+from app.schemas.memory_engine import MemorySolveRequest
+from app.services.memory_engine_service import run_memory_engine
 
 router = APIRouter(prefix="/api/memory", tags=["记忆管理"])
 
@@ -46,6 +50,18 @@ _next_id: int = 1
 def get_memory_store() -> dict[int, MemoryItem]:
     """获取记忆存储（用于其他模块访问）"""
     return _memories
+
+
+@router.post("/solve")
+async def solve_memory(request: MemorySolveRequest):
+    """记忆引擎：输入题目+答案，输出结构化记忆卡片数据"""
+    try:
+        data = run_memory_engine(request.rawText)
+        return {"ok": True, "data": data}
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"ok": False, "message": str(exc)})
+    except Exception:
+        return JSONResponse(status_code=500, content={"ok": False, "message": "记忆引擎处理失败"})
 
 
 @router.get("")
